@@ -34,13 +34,25 @@
     return tokens.filter((t) => t.nodeId.includes(q)).map((t) => t.nodeId);
   });
 
+  const URL_PARAM = 'token';
+
+  /** Keep the focused token in the URL so it survives reloads and can be shared. */
+  function writeUrl(nodeId: string | null) {
+    const url = new URL(location.href);
+    if (nodeId) url.searchParams.set(URL_PARAM, nodeId);
+    else url.searchParams.delete(URL_PARAM);
+    if (url.href !== location.href) history.replaceState(history.state, '', url);
+  }
+
   function load(json: unknown, name: string) {
     try {
       graph = parseTokens(json);
       fileName = name;
       error = '';
-      focus = null;
-      query = '';
+      // Restore the token from the URL if this file has it; otherwise leave the URL alone so it still works for the next file
+      const fromUrl = new URL(location.href).searchParams.get(URL_PARAM);
+      focus = (fromUrl && findExact(fromUrl)?.nodeId) || null;
+      query = focus ? graph.tokens.get(focus)!.id : '';
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -62,11 +74,12 @@
 
   /** Exact path → focus it. `layer:path` also works for layered files. */
   function findExact(q: string) {
-    return graph?.tokens.get(q) ?? tokens.find((t) => t.id === q);
+    return graph?.tokens.get(q) ?? [...(graph?.tokens.values() ?? [])].find((t) => t.id === q);
   }
 
   function oninput() {
     focus = findExact(query.trim())?.nodeId ?? null;
+    if (focus) writeUrl(focus);
   }
 
   function onkeydown(event: KeyboardEvent) {
@@ -77,6 +90,7 @@
   function select(nodeId: string | null) {
     focus = nodeId;
     query = nodeId ? graph!.tokens.get(nodeId)!.id : '';
+    writeUrl(nodeId);
   }
 
   const show = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
@@ -140,7 +154,13 @@
       </div>
       <aside>
         {#if focused}
-          <h2>{focused.id}</h2>
+          <h2 class:deprecated={focused.deprecated}>{focused.id}</h2>
+          {#if focused.deprecated}
+            <p class="deprecation" role="note">
+              <strong>Deprecated</strong>{#if focused.deprecated !== true}: {focused.deprecated}{/if}
+            </p>
+          {/if}
+          {#if focused.description}<p class="description">{focused.description}</p>{/if}
           <dl>
             {#if focused.layer}<dt>Layer</dt><dd>{focused.layer}</dd>{/if}
             <dt>Type</dt><dd>{focused.type ?? '—'}</dd>
@@ -278,6 +298,20 @@
   aside h3 {
     font-size: 13px;
     margin: 16px 0 4px;
+  }
+  aside h2.deprecated {
+    text-decoration: line-through;
+    color: var(--muted);
+  }
+  .deprecation {
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    border-inline-start: 3px solid var(--unused);
+    background: var(--unused-bg);
+  }
+  .description {
+    margin: 0 0 12px;
+    white-space: pre-line;
   }
   dl {
     display: grid;

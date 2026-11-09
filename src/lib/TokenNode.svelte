@@ -13,7 +13,7 @@
   );
 </script>
 
-<div class="token" class:unused class:broken={token.unresolved.length > 0} class:invalid={token.issues.length > 0}>
+<div class="token" class:deprecated={token.deprecated} class:unused class:broken={token.unresolved.length > 0} class:invalid={token.issues.length > 0}>
   <Handle type="target" position={Position.Left} isConnectable={false} />
   <div class="row">
     {#if token.type === 'color' && token.resolved}
@@ -25,6 +25,9 @@
     {#if token.layer}<span class="layer">{token.layer}</span>{/if}
     {#if token.type}<span class="type">{token.type}</span>{/if}
     <span class="value" title={display}>{display}</span>
+    {#if token.deprecated}
+      <span class="badge deprecated" title={token.deprecated === true ? 'Deprecated' : token.deprecated}>deprecated</span>
+    {/if}
     {#if unused}<span class="badge">unused</span>{/if}
     {#if token.issues.length}
       <span class="badge error" title={token.issues.join('\n')}>{token.issues.length === 1 ? 'error' : `${token.issues.length} errors`}</span>
@@ -54,6 +57,17 @@
   .invalid {
     border-color: var(--invalid);
     background: var(--invalid-bg);
+  }
+  .deprecated {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      transparent 0 6px,
+      var(--deprecated-stripe) 6px 12px
+    );
+  }
+  .deprecated .id {
+    text-decoration: line-through;
+    color: var(--muted);
   }
   .broken {
     border-style: dashed;
@@ -101,6 +115,9 @@
     background: var(--unused);
     color: white;
     font-weight: 600;
+  }
+  .badge.deprecated {
+    background: var(--muted);
   }
   .badge.error {
     background: var(--invalid);

@@ -8,6 +8,7 @@
   --unused: light-dark(#c2410c, #fb923c);
   --unused-bg: light-dark(#fff7ed, #431407);
   --invalid: light-dark(#b91c1c, #f87171);
+  --deprecated-stripe: light-dark(#0000000a, #ffffff0d);
   --invalid-bg: light-dark(#fef2f2, #450a0a);
   font: 14px/1.4 system-ui, sans-serif;
 }

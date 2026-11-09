@@ -24,6 +24,10 @@ export interface TokenInfo {
   id: string;
   layer?: string;
   type?: string;
+  /** `$description` */
+  description?: string;
+  /** `$deprecated` (own or inherited from a group): `true`, or a message explaining the deprecation */
+  deprecated?: true | string;
   /** Authored value (may contain references) */
   value: unknown;
   /** Final value after following references, if it's a primitive */
@@ -86,18 +90,24 @@ const collectRefs = (value: unknown, out: string[] = []): string[] => {
   return out;
 };
 
-/** DTCG allows `$type` on groups, inherited by descendants. */
-const inheritedType = (root: Record<string, unknown>, path: string[]): string | undefined => {
+/** DTCG allows `$type` and `$deprecated` on groups, inherited by descendants (the closest one wins). */
+const inherited = (root: Record<string, unknown>, path: string[], key: string): unknown => {
   let node: unknown = root;
-  let type: string | undefined;
-  for (const segment of path) {
+  let found: unknown;
+  for (const segment of [...path, undefined]) {
     if (!isValueObject(node)) break;
-    if (typeof node['$type'] === 'string') type = node['$type'];
+    if (Object.hasOwn(node, key)) found = node[key];
+    if (segment === undefined) break;
     node = node[segment];
   }
-  if (isValueObject(node) && typeof node['$type'] === 'string') type = node['$type'];
-  return type;
+  return found;
 };
+
+const asString = (v: unknown) => (typeof v === 'string' ? v : undefined);
+
+/** `$deprecated: true` or a non-empty message means deprecated; `false` (e.g. overriding a group) means not. */
+const asDeprecated = (v: unknown): true | string | undefined =>
+  v === true ? true : typeof v === 'string' && v.trim() ? v : undefined;
 
 const isCheckedLayer = (layer: string) => layer === 'basis' || layer === 'common' || layer.startsWith('common/');
 
@@ -133,7 +143,9 @@ export function parseTokens(root: unknown): TokenGraph {
       nodeId,
       id,
       layer,
-      type: typeof token['$type'] === 'string' ? token['$type'] : inheritedType(root, path),
+      type: asString(inherited(root, path, '$type')),
+      description: asString(token['$description']) || undefined,
+      deprecated: asDeprecated(inherited(root, path, '$deprecated')),
       value: authoredValue(token),
       refs: [...new Set(allRefs[i])],
       references: [],
