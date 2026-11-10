@@ -11,6 +11,8 @@
   let error = $state('');
   let query = $state('');
   let focus = $state<string | null>(null);
+  /** Group path (e.g. `basis.text.font-size`) whose tokens are drawn when no single token is focused */
+  let group = $state<string | null>(null);
   let showUnused = $state(false);
   setContext('showUnused', { get current() { return showUnused; } });
 
@@ -18,7 +20,17 @@
   let unused = $derived(tokens.filter((t) => t.unused));
   let invalid = $derived(tokens.filter((t) => t.issues.length > 0));
   let issueCount = $derived(invalid.reduce((n, t) => n + t.issues.length, 0) + (graph?.issues.length ?? 0));
-  let searchIds = $derived([...new Set(tokens.map((t) => t.id))].sort());
+  // Token ids plus every group path above them, so groups can be picked from the suggestions too
+  let searchIds = $derived(
+    [
+      ...new Set(
+        tokens.flatMap((t) => {
+          const parts = t.id.split('.');
+          return parts.map((_, i) => parts.slice(0, i + 1).join('.'));
+        }),
+      ),
+    ].sort(),
+  );
   let focused = $derived(focus ? graph?.tokens.get(focus) : undefined);
 
   // A few thousand <option>s make every keystroke slow, so only offer the first matches
@@ -34,14 +46,37 @@
     return tokens.filter((t) => t.nodeId.includes(q)).map((t) => t.nodeId);
   });
 
-  const URL_PARAM = 'token';
+  /** Drawing thousands of nodes is what makes the full graph unusable, so big groups are listed but not drawn */
+  const MAX_GROUP = 500;
+  let groupMembers = $derived(group ? findGroup(group) : []);
 
-  /** Keep the focused token in the URL so it survives reloads and can be shared. */
-  function writeUrl(nodeId: string | null) {
+  const URL_PARAM = 'token';
+  const URL_GROUP = 'group';
+
+  /**
+   * Keep the focused token or group in the URL so it survives reloads, can be shared, and back/forward navigate
+   * between tokens. Typing creates a single history entry (updated while typing) instead of one per keystroke.
+   */
+  function writeUrl(nodeId: string | null, groupPath: string | null = null, { typed = false } = {}) {
     const url = new URL(location.href);
     if (nodeId) url.searchParams.set(URL_PARAM, nodeId);
     else url.searchParams.delete(URL_PARAM);
-    if (url.href !== location.href) history.replaceState(history.state, '', url);
+    if (groupPath) url.searchParams.set(URL_GROUP, groupPath);
+    else url.searchParams.delete(URL_GROUP);
+    if (url.href === location.href) return;
+    if (typed && history.state?.typed) history.replaceState({ typed }, '', url);
+    else history.pushState({ typed }, '', url);
+  }
+
+  /** Show the token or group from the URL, if this file has it. */
+  function readUrl() {
+    if (!graph) return;
+    const params = new URL(location.href).searchParams;
+    const fromUrl = params.get(URL_PARAM);
+    const groupFromUrl = params.get(URL_GROUP);
+    focus = (fromUrl && findExact(fromUrl)?.nodeId) || null;
+    group = !focus && groupFromUrl && findGroup(groupFromUrl).length ? groupFromUrl : null;
+    query = focus ? graph.tokens.get(focus)!.id : (group ?? '');
   }
 
   function load(json: unknown, name: string) {
@@ -50,9 +85,7 @@
       fileName = name;
       error = '';
       // Restore the token from the URL if this file has it; otherwise leave the URL alone so it still works for the next file
-      const fromUrl = new URL(location.href).searchParams.get(URL_PARAM);
-      focus = (fromUrl && findExact(fromUrl)?.nodeId) || null;
-      query = focus ? graph.tokens.get(focus)!.id : '';
+      readUrl();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -77,24 +110,36 @@
     return graph?.tokens.get(q) ?? [...(graph?.tokens.values() ?? [])].find((t) => t.id === q);
   }
 
+  /** nodeIds of all tokens below a group path (`a.b` or `layer:a.b`; a trailing `.` is ignored). */
+  function findGroup(q: string): string[] {
+    const prefix = q.replace(/\.+$/, '') + '.';
+    if (prefix === '.') return [];
+    return tokens.filter((t) => t.id.startsWith(prefix) || t.nodeId.startsWith(prefix)).map((t) => t.nodeId);
+  }
+
   function oninput() {
-    focus = findExact(query.trim())?.nodeId ?? null;
-    if (focus) writeUrl(focus);
+    const q = query.trim();
+    focus = findExact(q)?.nodeId ?? null;
+    group = !focus && findGroup(q).length ? q.replace(/\.+$/, '') : null;
+    if (focus || group) writeUrl(focus, group, { typed: true });
   }
 
   function onkeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !focus && matches.length > 0) select(matches[0]);
+    if (event.key === 'Enter' && !focus && !group && matches.length > 0) select(matches[0]);
     if (event.key === 'Escape') select(null);
   }
 
   function select(nodeId: string | null) {
     focus = nodeId;
+    group = null;
     query = nodeId ? graph!.tokens.get(nodeId)!.id : '';
     writeUrl(nodeId);
   }
 
   const show = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
 </script>
+
+<svelte:window onpopstate={readUrl} />
 
 <div class="app">
   <header>
@@ -134,7 +179,7 @@
         {graph.layered ? 'layered' : 'root'}
         · {#if issueCount}<strong class="invalid-count">{issueCount} {issueCount === 1 ? 'error' : 'errors'}</strong>{:else}valid{/if}
         {#if showUnused}· <strong class="unused-count">{unused.length} unused</strong>{/if}
-        {#if matches.length}· {matches.length} matches{/if}
+        {#if group}· {groupMembers.length} in group{:else if matches.length}· {matches.length} matches{/if}
       </span>
     {/if}
   </header>
@@ -148,8 +193,14 @@
           <SvelteFlowProvider>
             <Graph {graph} {focus} onselect={select} />
           </SvelteFlowProvider>
+        {:else if group && groupMembers.length <= MAX_GROUP}
+          <SvelteFlowProvider>
+            <Graph {graph} ids={groupMembers} onselect={select} />
+          </SvelteFlowProvider>
+        {:else if group}
+          <p class="empty">{group} has {groupMembers.length} tokens, too many to draw. Pick a smaller group.</p>
         {:else}
-          <p class="empty">Search for a token to see its reference chain.</p>
+          <p class="empty">Search for a token to see its reference chain, or a group to see all tokens in it.</p>
         {/if}
       </div>
       <aside>
@@ -201,6 +252,11 @@
             <h3>Referenced by ({focused.usedBy.length})</h3>
             <ul>{#each focused.usedBy as id (id)}<li><button type="button" onclick={() => select(id)}>{id}</button></li>{/each}</ul>
           {/if}
+        {:else if group}
+          <h2>{group}</h2>
+          <h3>Tokens in group ({groupMembers.length})</h3>
+          <ul>{#each groupMembers.slice(0, MAX_MATCHES) as id (id)}<li><button type="button" onclick={() => select(id)}>{id}</button></li>{/each}</ul>
+          {#if groupMembers.length > MAX_MATCHES}<p class="hint">…and {groupMembers.length - MAX_MATCHES} more.</p>{/if}
         {:else if matches.length}
           <h3>Matches ({matches.length})</h3>
           <ul>{#each matches.slice(0, MAX_MATCHES) as id (id)}<li><button type="button" onclick={() => select(id)}>{id}</button></li>{/each}</ul>

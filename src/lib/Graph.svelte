@@ -8,15 +8,17 @@
   interface Props {
     graph: TokenGraph;
     /** nodeId of the focused token; only its reference chain is drawn */
-    focus: string;
+    focus?: string;
+    /** Without a focus: draw exactly these tokens (e.g. a group) and the refs between them */
+    ids?: string[];
     onselect: (nodeId: string) => void;
   }
-  let { graph, focus, onselect }: Props = $props();
+  let { graph, focus, ids = [], onselect }: Props = $props();
 
   const nodeTypes = { token: TokenNode };
   const { fitView } = useSvelteFlow();
 
-  let chain = $derived(subgraph(graph, relatedTo(graph, focus)));
+  let chain = $derived(subgraph(graph, focus ? relatedTo(graph, focus) : new Set(ids)));
 
   let nodes = $state.raw<Node<{ token: TokenInfo }>[]>([]);
   let edges = $state.raw<Edge[]>([]);
@@ -37,10 +39,10 @@
     const nextEdges: Edge[] = chain.edges.map(({ source, target }) => ({ id: `${source}->${target}`, source, target }));
 
     // Contrast partners of the focused token; those outside the chain get their own column on the left
-    const focusPos = positions.get(focus)!;
+    const focusPos = focus ? positions.get(focus)! : { x: 0, y: 0 };
     const left = Math.min(...[...positions.values()].map((p) => p.x)) - NODE_WIDTH - COL_GAP;
     let row = 0;
-    for (const pair of graph.tokens.get(focus)!.contrast) {
+    for (const pair of focus ? graph.tokens.get(focus)!.contrast : []) {
       if (!nextNodes.some((n) => n.id === pair.nodeId)) {
         const position = { x: left, y: focusPos.y + row++ * (NODE_HEIGHT + ROW_GAP) };
         nextNodes.push(toNode(graph.tokens.get(pair.nodeId)!, position));
@@ -49,7 +51,7 @@
       nextEdges.push({
         id: `contrast:${pair.nodeId}`,
         source: pair.nodeId,
-        target: focus,
+        target: focus!,
         label: pair.ratio === undefined ? `≥ ${pair.expectedRatio}:1` : `${pair.ratio.toFixed(2)}:1`,
         class: failing ? 'contrast failing' : 'contrast',
       });
