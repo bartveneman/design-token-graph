@@ -1,8 +1,17 @@
 <script lang="ts">
-  import { setContext } from 'svelte';
+  import { onMount, setContext } from 'svelte';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import Graph from './lib/Graph.svelte';
   import { parseTokens, type TokenGraph } from './lib/tokens';
+  import {
+    clearHandle,
+    ensurePermission,
+    loadHandle,
+    pickFile,
+    saveHandle,
+    supportsHandles,
+    watchFile,
+  } from './lib/file-source';
   import startDistUrl from '@nl-design-system-unstable/start-design-tokens/dist/tokens.json?url';
   import startFigmaUrl from '@nl-design-system-unstable/start-design-tokens/figma/start.tokens.json?url';
 
@@ -79,30 +88,132 @@
     query = focus ? graph.tokens.get(focus)!.id : (group ?? '');
   }
 
-  function load(json: unknown, name: string) {
+  function load(json: unknown, name: string): boolean {
     try {
       graph = parseTokens(json);
       fileName = name;
       error = '';
       // Restore the token from the URL if this file has it; otherwise leave the URL alone so it still works for the next file
       readUrl();
+      return true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+      return false;
     }
   }
 
-  async function onfile(event: Event) {
-    const file = (event.currentTarget as HTMLInputElement).files?.[0];
-    if (!file) return;
+  /** Parse failures (e.g. a half-saved file) only show an error and keep the current graph. */
+  function readText(text: string, name: string): boolean {
     try {
-      load(JSON.parse(await file.text()), file.name);
+      return load(JSON.parse(text), name);
     } catch (e) {
-      error = `Could not read ${file.name}: ${e instanceof Error ? e.message : e}`;
+      error = `Could not read ${name}: ${e instanceof Error ? e.message : e}`;
+      return false;
     }
+  }
+
+  /** Briefly confirm in the header that a change on disk was picked up */
+  let updated = $state(false);
+  let updatedTimer: ReturnType<typeof setTimeout> | undefined;
+  function flashUpdated() {
+    clearTimeout(updatedTimer);
+    updated = true;
+    updatedTimer = setTimeout(() => (updated = false), 2000);
+  }
+
+  // Where the current graph came from. Chromium gets a live file handle, other browsers a one-off File.
+  let source = $state<'handle' | 'input' | 'example' | null>(null);
+  /** Live handle to the file on disk (Chromium): watched for changes and restored after a reload */
+  let handle = $state.raw<FileSystemFileHandle | null>(null);
+  /** Handle restored after a reload whose read permission must be granted again with a click */
+  let pending = $state.raw<FileSystemFileHandle | null>(null);
+  let stopWatch: (() => void) | null = null;
+  let fileInput: HTMLInputElement | undefined = $state();
+
+  function closeHandle() {
+    stopWatch?.();
+    stopWatch = null;
+    handle = null;
+    pending = null;
+  }
+
+  async function openHandle(h: FileSystemFileHandle) {
+    closeHandle();
+    const file = await h.getFile();
+    readText(await file.text(), file.name);
+    source = 'handle';
+    handle = h;
+    saveHandle(h);
+    stopWatch = watchFile(h, async (f) => {
+      if (readText(await f.text(), f.name)) flashUpdated();
+    });
+  }
+
+  async function openPicker() {
+    let h: FileSystemFileHandle;
+    try {
+      h = await pickFile();
+    } catch {
+      return; // picker cancelled
+    }
+    try {
+      await openHandle(h);
+    } catch (e) {
+      error = `Could not read ${h.name}: ${e instanceof Error ? e.message : e}`;
+    }
+  }
+
+  async function reopen() {
+    const h = pending;
+    if (!h || !(await ensurePermission(h, { request: true }))) return;
+    try {
+      await openHandle(h);
+    } catch (e) {
+      error = `Could not read ${h.name}: ${e instanceof Error ? e.message : e}`;
+      clearHandle();
+    }
+  }
+
+  /** Reopen the file from the previous visit; needs a click when the browser didn't keep the permission. */
+  async function restore() {
+    const h = await loadHandle();
+    if (!h) return;
+    if (!(await ensurePermission(h))) {
+      pending = h;
+      return;
+    }
+    try {
+      await openHandle(h);
+    } catch (e) {
+      error = `Could not reopen ${h.name}: ${e instanceof Error ? e.message : e}`;
+      clearHandle(); // moved or deleted
+    }
+  }
+
+  onMount(() => {
+    if (supportsHandles) restore();
+    return () => {
+      stopWatch?.();
+      clearTimeout(updatedTimer);
+    };
+  });
+
+  /** Fallback without file handles: a one-off read, re-select the file to pick up changes. */
+  async function onfile(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    readText(await file.text(), file.name);
+    source = 'input';
+    // otherwise selecting the same file again doesn't fire `change`
+    input.value = '';
   }
 
   async function loadExample(url: string, name: string) {
+    closeHandle();
+    clearHandle();
     load(await (await fetch(url)).json(), name);
+    source = 'example';
   }
 
   /** Exact path → focus it. `layer:path` also works for layered files. */
@@ -143,10 +254,22 @@
 
 <div class="app">
   <header>
-    <label class="file">
-      <span>tokens.json</span>
-      <input type="file" accept=".json,application/json" onchange={onfile} />
-    </label>
+    {#if supportsHandles}
+      <button type="button" onclick={openPicker}>Open tokens.json</button>
+      {#if pending}
+        <button type="button" onclick={reopen}>Reopen {pending.name}</button>
+      {/if}
+    {:else}
+      <label class="file">
+        <span>tokens.json</span>
+        <input bind:this={fileInput} type="file" accept=".json,application/json" onchange={onfile} />
+      </label>
+      {#if source === 'input'}
+        <button type="button" onclick={() => fileInput?.click()} title="Select the file again to load your latest changes">
+          Reload {fileName}
+        </button>
+      {/if}
+    {/if}
     <span class="examples">
       or try
       <button type="button" onclick={() => loadExample(startDistUrl, 'start (dist)')}>start (dist)</button>
@@ -175,11 +298,13 @@
 
     {#if graph}
       <span class="stats">
-        {fileName} · {tokens.length} tokens · {graph.edges.length} refs ·
-        {graph.layered ? 'layered' : 'root'}
+        {#if handle}<span class="live" class:updated title="{fileName} reloads automatically when it changes on disk"
+            ><span class="live-icon" aria-hidden="true">{updated ? '✔' : '●'}</span> watching</span
+          > ·{/if}
+        {tokens.length} tokens
         · {#if issueCount}<strong class="invalid-count">{issueCount} {issueCount === 1 ? 'error' : 'errors'}</strong>{:else}valid{/if}
         {#if showUnused}· <strong class="unused-count">{unused.length} unused</strong>{/if}
-        {#if group}· {groupMembers.length} in group{:else if matches.length}· {matches.length} matches{/if}
+        {#if !group && matches.length}· {matches.length} matches{/if}
       </span>
     {/if}
   </header>
@@ -316,6 +441,33 @@
   .stats {
     color: var(--muted);
     font-size: 13px;
+  }
+  .live {
+    color: var(--accent);
+    transition: color 0.3s;
+  }
+  .live-icon {
+    display: inline-block;
+  }
+  .live.updated {
+    color: var(--success);
+    transition-duration: 0.1s;
+  }
+  .live.updated .live-icon {
+    animation: pop 0.3s ease-out;
+  }
+  @keyframes pop {
+    from {
+      transform: scale(0.4);
+    }
+    60% {
+      transform: scale(1.3);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live.updated .live-icon {
+      animation: none;
+    }
   }
   .unused-count {
     color: var(--unused);
